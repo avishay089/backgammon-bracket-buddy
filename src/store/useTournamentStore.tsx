@@ -49,7 +49,7 @@ const initialState: TournamentState = {
 
 // Actions
 type Action =
-  | { type: "ADD_DIVISION"; name: string }
+  | { type: "ADD_DIVISION"; name: string; id?: string }
   | { type: "REMOVE_DIVISION"; id: string }
   | { type: "ADD_PLAYER"; divisionId: string; name: string }
   | { type: "REMOVE_PLAYER"; id: string }
@@ -161,7 +161,7 @@ function propagateWinners(playoffs: Playoffs): Playoffs {
 function reducer(state: TournamentState, action: Action): TournamentState {
   switch (action.type) {
     case "ADD_DIVISION": {
-      const division: Division = { id: nanoid(), name: action.name.trim() };
+      const division: Division = { id: action.id ?? nanoid(), name: action.name.trim() };
       if (!division.name) return state;
       return { ...state, divisions: [...state.divisions, division] };
     }
@@ -198,13 +198,130 @@ function reducer(state: TournamentState, action: Action): TournamentState {
       return { ...state, matches };
     }
     case "SEED_PLAYOFFS": {
-      // Aggregate standings across all divisions
-      const standings = computeStandingsMap(state);
-      const allRows: StandingsRow[] = Object.values(standings).flat();
-      const sorted = allRows.sort((a, b) => b.wins - a.wins || b.gammonWins - a.gammonWins || a.player.name.localeCompare(b.player.name));
-      const topPlayers = sorted.slice(0, action.size).map((r) => r.player);
-      const rounds = seedPlayoffRounds(topPlayers, action.size);
-      const playoffs: Playoffs = { size: action.size, rounds, seeded: true };
+      // Take top 2 from each division, seed cross-division (1 vs next division's 2),
+      // and assign byes to highest seeds when participants are not a power of two.
+      const standingsByDiv = computeStandingsMap(state);
+      const divisions = state.divisions;
+
+      // Build lookup for quick stat comparison
+      const allRows: StandingsRow[] = Object.values(standingsByDiv).flat();
+      const rowByPlayer: Record<string, StandingsRow> = Object.fromEntries(
+        allRows.map((r) => [r.player.id, r])
+      );
+      const cmp = (aId: string, bId: string) => {
+        const a = rowByPlayer[aId];
+        const b = rowByPlayer[bId];
+        if (!a && !b) return 0;
+        if (!a) return 1;
+        if (!b) return -1;
+        return (
+          b.wins - a.wins ||
+          b.gammonWins - a.gammonWins ||
+          a.player.name.localeCompare(b.player.name)
+        );
+      };
+
+      // Collect 1-seeds and 2-seeds per division (only divisions with at least 1/2 players)
+      const divsWithRows = divisions.map((d) => ({ d, rows: standingsByDiv[d.id] || [] }));
+      const oneSeedsByDiv = divsWithRows.map(({ rows }) => rows[0]?.player).filter(Boolean) as Player[];
+      const twoSeedsByDiv = divsWithRows.map(({ rows }) => rows[1]?.player).filter(Boolean) as Player[];
+
+      const totalPlayers = oneSeedsByDiv.length + twoSeedsByDiv.length;
+      if (totalPlayers < 2) return state;
+
+      // Determine bracket size (4|8|16)
+      const size = (totalPlayers <= 4 ? 4 : totalPlayers <= 8 ? 8 : 16) as 4 | 8 | 16;
+      const numByes = size - totalPlayers; // always even
+
+      // Rank seeds globally: first all 1-seeds by performance, then 2-seeds
+      const sortedOne = [...oneSeedsByDiv].sort((a, b) => cmp(a.id, b.id));
+      const sortedTwo = [...twoSeedsByDiv].sort((a, b) => cmp(a.id, b.id));
+
+      // Highest seeds receive byes (prefer 1-seeds first)
+      const byeIds: string[] = [];
+      for (const p of sortedOne) {
+        if (byeIds.length >= numByes) break;
+        byeIds.push(p.id);
+      }
+      for (const p of sortedTwo) {
+        if (byeIds.length >= numByes) break;
+        byeIds.push(p.id);
+      }
+      const byeSet = new Set(byeIds);
+
+      // Build initial cross-division pairings using only divisions that have both seeds
+      const pairDivIndices = divsWithRows
+        .map((x, i) => (x.rows.length >= 2 ? i : -1))
+        .filter((i) => i !== -1) as number[];
+
+      const firstRound: PlayoffMatch[] = [];
+      const leftovers: string[] = [];
+
+      if (pairDivIndices.length > 0) {
+        for (let k = 0; k < pairDivIndices.length; k++) {
+          const i = pairDivIndices[k];
+          const j = pairDivIndices[(k + 1) % pairDivIndices.length];
+          const a = divsWithRows[i].rows[0]?.player.id;
+          const b = divsWithRows[j].rows[1]?.player.id;
+          if (!a || !b) continue;
+
+          // If any side has a bye, remove this pair and collect the opponent
+          if (byeSet.has(a) && byeSet.has(b)) {
+            // both are byes -> each will be advanced separately
+            continue;
+          } else if (byeSet.has(a)) {
+            leftovers.push(b);
+            continue;
+          } else if (byeSet.has(b)) {
+            leftovers.push(a);
+            continue;
+          } else {
+            firstRound.push({ id: nanoid(), roundIndex: 0, aId: a, bId: b });
+          }
+        }
+      }
+
+      // Add any divisions that only had a 1-seed (no 2-seed) into leftovers if they didn't get a bye
+      for (let idx = 0; idx < divsWithRows.length; idx++) {
+        const rows = divsWithRows[idx].rows;
+        if (rows.length === 1) {
+          const pid = rows[0].player.id;
+          if (!byeSet.has(pid)) leftovers.push(pid);
+        }
+      }
+
+      // Pair leftovers among themselves
+      for (let i = 0; i + 1 < leftovers.length; i += 2) {
+        firstRound.push({ id: nanoid(), roundIndex: 0, aId: leftovers[i], bId: leftovers[i + 1] });
+      }
+
+      // Create bye matches (auto-advance winners)
+      for (const id of byeIds) {
+        firstRound.push({ id: nanoid(), roundIndex: 0, aId: id, winnerId: id });
+      }
+
+      // Ensure correct number of first-round matches by padding with empty if needed
+      const expectedFirstRound = size / 2;
+      while (firstRound.length < expectedFirstRound) {
+        firstRound.push({ id: nanoid(), roundIndex: 0 });
+      }
+
+      // Subsequent rounds
+      const rounds: PlayoffMatch[][] = [];
+      rounds.push(firstRound);
+      let remaining = size / 2;
+      let roundIdx = 1;
+      while (remaining >= 1) {
+        const round: PlayoffMatch[] = [];
+        for (let i = 0; i < Math.floor(remaining / 2); i++) {
+          round.push({ id: nanoid(), roundIndex: roundIdx });
+        }
+        if (round.length > 0) rounds.push(round);
+        remaining = Math.floor(remaining / 2);
+        roundIdx++;
+      }
+
+      const playoffs: Playoffs = { size, rounds, seeded: true };
       return { ...state, playoffs };
     }
     case "RECORD_PLAYOFF_RESULT": {

@@ -30,7 +30,7 @@ const PlayoffBracket = () => {
             </SelectContent>
           </Select>
           <Button disabled={!canSeed} onClick={() => dispatch({ type: "SEED_PLAYOFFS", size: Number(size) as any })}>
-            Seed from Standings
+            Seed Top 2 per Division
           </Button>
         </CardContent>
       </Card>
