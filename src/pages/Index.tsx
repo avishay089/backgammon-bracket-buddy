@@ -1,4 +1,5 @@
 import { Button } from "@/components/ui/button";
+import { Link } from "react-router-dom";
 import SEO from "@/components/SEO";
 
 const Index = () => {
@@ -15,9 +16,9 @@ const Index = () => {
           Organize divisions, generate match schedules, track results including gammons, and advance smoothly to playoffs.
         </p>
         <div className="flex items-center justify-center gap-4">
-          <a href="/tournament">
+          <Link to="/tournament">
             <Button variant="default" size="lg">Start Tournament</Button>
-          </a>
+          </Link>
           <a href="#learn-more">
             <Button variant="outline" size="lg">Learn More</Button>
           </a>
