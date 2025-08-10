@@ -5,7 +5,7 @@ import { componentTagger } from "lovable-tagger";
 
 // https://vitejs.dev/config/
 export default defineConfig(({ mode }) => ({
-  base: mode === 'production' ? '/backgammon/' : '/',
+  base: mode === 'production' ? '/backgammon-bracket-buddy/' : '/',
   server: {
     host: "::",
     port: 8080,
